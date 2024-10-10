@@ -1,0 +1,441 @@
+---
+title: "Cleaning template general"
+author: "Your Name"
+date: "January 2024"
+output: utilityR::cleaning_template
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setup the values}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+rm(list = ls())
+
+
+directory_dictionary <- list(
+  research_cycle_name = 'xxxx',
+  round = 'xxxx',
+  dir.audits = "data/inputs/audits/", # The directory to your audit files
+  dir.audits.check = "output/checking/audit/",# The directory to your audit summary files (you'll be checking these)
+  dir.requests = "output/checking/requests/", # the directory of your other_requests file
+  dir.responses = "output/checking/responses/", # the directory of your responses to open questions
+  enum_colname = "XXX", # the column that contains the enumerator ID,
+  enum_comments = 'XXX', # the column that contains the enumerator's comments,
+  filename.tool = "resources/XXX.xlsx", # the name of your Kobo tool and its path
+  data_name = "XXXX.xlsx", # the name of your dataframe
+  data_path = "data/inputs/kobo_export/", # the path to your dataframe
+  label_colname = 'label::English', # the name of your label column. Has to be identical in Kobo survey and choices sheets
+  dctime_short = "XXXX" # the data of your survey (just for naming)
+)
+
+source("src/init.R")
+
+```
+
+Set up how the data will be loaded here. If using API key, this will load the latest data fom your kobo server and create excel files in the appropriate folders. If not, set use_API to false (this will also cause Kobo audits to not be loaded from the kobo server but from the files in the `audits` folder).
+```{r Base section - setup how the data will be loaded}
+# If loading the data through API fill the following
+# use API key?
+use_API <- T
+token <- "e5895090cb45140ad364f68b8592d32a38bf007a" # check your token at https://kobo.impact-initiatives.org/token/?format=json
+
+# connect to the server here
+kobo_setup(url = "https://kobo.impact-initiatives.org/",
+           token = token)
+
+
+kobo_asset_list()  # you can check all your available assets with kobo_asset_list() and select the correct uid out of that
+asset_uid <- 'aBB5WE2RVBfUaDRctcj7pC'
+
+```
+
+Add the API key file into `resources` directory prior to running this
+
+```{r initialize_packages_load_inputs}
+
+api_key <- source('resources/microsoft.api.key_ukraine_new.R')$value
+
+#-------------------------------Initialize packages, load tools -----------------------------
+source("src/load_Data.R")
+
+```
+
+Section below only for research cycles that requires cleaning on regular basis and use one kobo server.
+
+```{r Section  0  - Data pre-processing}
+
+source('src/sections/process_old_data.R')
+
+
+# final preparation
+# Rename your dataframes
+
+raw.main <- kobo.raw.main
+
+sheet_names <- sheet_names[sheet_names!='kobo.raw.main']
+sheet_names_new <- gsub('kobo.','',sheet_names)
+
+if(length(sheet_names_new)>0){
+  for(i in 1:length(sheet_names_new)){
+    txt <- paste0(sheet_names_new[i],' <- ',sheet_names[i])
+    eval(parse(text=txt))
+  }
+}
+
+
+
+
+# select the columns in your data that contain date elements
+date_cols_main <- c("start","end", tool.survey %>% filter(type == "date" & datasheet == "main") %>% pull(name),
+                    "submission_time") # add them here
+
+# transform them into the datetime format
+raw.main <- raw.main %>%
+  mutate_at(date_cols_main, ~ifelse(!str_detect(., '-'), as.character(convertToDateTime(as.numeric(.))), .))
+
+rm(date_cols_main)
+
+# If there were any changes in the tool during data collection, they can be run here
+source('src/sections/tool_modification.R')
+
+
+```
+
+Go into the script to specify the no-consent codition. Otherwise no manual entry is necessary on this bit of the script
+
+```{r Section  1  - Remove duplicates and No consent entries}
+source('src/sections/section_1_remove_duplicates_no_consents.R')
+```
+
+Specify the necessary parameters of the audit check in the rows below and run the source command
+
+```{r Section  2  - Audit checks + soft duplicates}
+min_duration_interview <- 5 # minimum duration of an interview (screen time in minutes)
+max_duration_interview <- 60 # maximum duration of an interview (screen time in minutes)
+pre_process_audit_files <- F # whether cases of respondent taking too long to answer 1 question should cleaned.
+# if pre_process_audit_files =T, enter the maximum time that  the respondent can spend answering 1 question (in minutes)
+max_length_answer_1_question <- 20
+# Used during the check for soft duplicates.
+# The minimum number of different columns that makes us confident that the entry is not a soft duplicate
+min_num_diff_questions <- 8
+
+
+# use API key for audit loading?
+use_API <- T
+
+# run the checks
+source('src/sections/section_2_run_audit_checks.R')
+```
+
+Once you've checked all entries in the files in "output/checking/audit/" directory and only left those rows that need to be deleted implement the decisions below
+
+```{r Section  2 - Implement deletion decisions}
+source('src/sections/section_2_run_audit_decisions.R')
+```
+
+The section below is dedicated to all geospatial checks that can be run on the data.
+
+```{r Section  3  - Loop inconsitencies + spatial checks}
+# audit geospatial check block------------------------------
+use_audit <- F # if using audit checks for geospatial checking. Set to false if not doing geospatial check from audits
+top_allowed_speed <- 15 # top allowed speed for an enumerator in km per hour
+initial_question <- '' # the question that you consider the start of the interview within audits - at which point in the interview we can be sure that the enumerator has started the interview?
+final_question <- '' # the question that you consider the end of the interview within audits - at which point in the interview we can be sure that the enumerator has ended the interview?
+
+omit_locations <- F # do you want to omit certail locations because GPS there may be too volatile ?
+location_column <- 'oblast' # doesn't have to match the merge_column if you're omitting other (larger geo levels). Leave blank if not using
+location_ids <- c('') # have to be present in the location_column! Leave blank if not using
+
+# polygonal files and the columns that indicate the interview location in both the polygon file and our dataframe
+polygon_file <- 'resources/UKR_ADM4_2020.geojson' # the file with polygons that were supposed to be sampled 
+polygon_file_merge_column <-'admin4Pcode' # what is the name of the column that signifies the name of the polygon in your json file? 
+merge_column <- 'settlement' # what is the name of the column that signifies the name of the polygon in your dataframe? Leave blank if not using
+# end of audit geospatial check block------------------------------
+
+#specify the column that holds the cordinates 
+geo_column <- 'geo_point' # the name of the column that holds your coordinates (in the data). Leave blank if not using
+
+source('src/sections/section_3_loops_and_spatial_checks.R')
+
+```
+Once you've checked all entries in the "output/checking/audit/geospatial_check"  and "output/checking/audit/gps_checks" and only left what needs to be deleted implement the decisions below
+```{r Section  3  - Loop inconsitencies + spatial checks decisions}
+source('src/sections/section_3_spatial_decisions.R')
+```
+
+As a separate block, here you can run individual checks for an enumerator. The script takes on the list of individual blocks of questions written as a list, and checks these blocks per enumerator, trying to find potential anomalies in in the enumerator's answer patterns.
+
+```{r Section  X  - Anomaly search}
+
+# set up the blocks of questions that'll be tested. It's best to choose the blocks you suspect may be clicked through by the enumerator.
+# This check will write Enumerator_anomalies.xlsx file into your `checking` folder where you'll have tests for problematic enumerators.
+
+ls_group <- list(
+  'list_1' = c(),
+  'list_2' = c()
+)
+
+# add the geospatial column - the analysis will be done per georgraphy, it's best to choose geography wide enough to get more enumerators working in an area, but local enough so that geographically specific patterns may come trhough (i.e. Answers in Lviv and Sumy will be different from one another, so it's better to keep them separate if possible)
+
+geo_column <- 'macroregion'
+
+if(!geo_column %in% colnames(raw.main)) {
+  stop("Geo column doesn't present into dataset")
+}
+
+# add a list of questions for logical anomalies check
+# This check will write Enumerator_anomalies_logic.xlsx file into your `checking` folder where you'll have info about enumerators with the biggest rate of anomalies surveys(the sequence of answers that deviates from the general statistics.)
+# You can also check this anomaly surveys into Enumerators_anomalies_logic_data.xlsx
+
+check.logic.questions <- c()
+
+# Example:
+# check.logic.questions <- c("B_15_wgss_seeing", "B_16_wgss_hearing",
+#                      "B_17_wgss_walking", "B_18_wgss_cognit", "B_19_wgss_selfcare",
+#                      "B_20_wgss_comm")
+
+
+source('src/sections/section_x_anomaly.R')
+```
+
+
+
+Now you're ready to create the full deletion log
+```{r Section  3  - write the deletion log}
+# duplicates are merged only prior to writing the file.
+deletion.log.new <- bind_rows(deletion.log.dupl,deletion.log.new)
+write.xlsx(deletion.log.new, make.filename.xlsx("output/deletion_log/", "deletion_log", no_date = T), overwrite=T)
+
+```
+
+
+Section below is a bit more involved. The first section can be run without your direct input, just be aware that this section will activate the translation function.
+Enter the columns `text` that don't need to be translated in the `trans_cols_to_skip`
+```{r Section  4 - Others and translations - setup}
+
+# translate all text questions, but skip these columns:
+trans_cols_to_skip <- c(
+  # add columns to skip
+  "enum_comms"
+)
+
+sheet_name_others <- 'Sheet2'
+
+other_request_file_sufix <- "other_requests_final"
+text_request_file_sufix <- "text_requests_final"
+
+# if you clean your data during the round of their collection, each time adding new samples
+partial_clean <- FALSE
+other_request_file_pattern <- paste(directory_dictionary$research_cycle_name,
+                                    directory_dictionary$round, "other_requests", sep = "_")
+
+text_request_file_pattern <- paste(directory_dictionary$research_cycle_name,
+                                   directory_dictionary$round, "text_requests_", sep = "_")
+
+source('src/sections/section_4_create_other_requests_files.R')
+
+# If you see that columns were missed from the translation. Please go into the `section_4_create_other_requests_files.R` script and tweak `missing_vars` object if something was missed from the `text` columns or `other.db` if something is missing from the `_other` columns.
+```
+
+After receiving the outputs of this function, please check the `dir.requests` directory and work through the other requests files filling them out. 
+
+```{r Section  4 - Others and translations - recoding}
+# name that hosts the clean recode.others file, leave as '' if you don't have this file. Nothing will be recoded that way
+name_clean_others_file <- other_request_file_pattern # name of the sheet where you're holding your requests
+# name that hosts the clean translation requests file, leave as '' if you don't have this file. Nothing will be recoded that way
+name_clean_trans_file <- text_request_file_pattern
+
+source('src/sections/section_4_apply_changes_to_requests.R')
+
+```
+
+Some post translation checks to make sure it all worked out. Doesn't need much involvement from your side if you did everything well. If not, you will get some warnings.
+
+```{r  Section  4 - additional checks}
+
+# Check if your data still has any non-english entries
+
+# variables that will be omitted from the analysis
+vars_to_omit <- c('settlement', directory_dictionary$enum_colname, directory_dictionary$enum_comments) # add more names as needed
+
+source('src/sections/section_4_post_check_for_leftover_non_eng.R')
+
+# Check that cumulative and binary values in select multiple match each other
+
+cleaning.log.match <- utilityR::select.multiple.check(raw.main, tool.survey, id_col="uuid")
+
+if (nrow(cleaning.log.match) > 0) {
+  write.xlsx(cleaning.log.match, "output/checking/select_multiple_match.xlsx", overwrite=T)
+}
+
+source('src/sections/section_4_check_binaries.R')
+```
+
+Check if any columns are equal to '999'/'99', enter any other values you're suspicious of
+
+```{r Section  5 - Check for 999/99 entries}
+code_for_check  <- c('99','999')
+
+source('src/sections/section_5_create_999_checks.R')
+
+print(cl_log_999)
+```
+if Anything got into cl_log_999, check it. If you want to delete it from your data run the command below set apply_999_changes to 'Yes' if you want to remove the entries from code_for_check
+
+```{r Section  5 - Fix 999/99 entries}
+apply_999_changes <- 'No'
+cl_log_999 <- readxl::read_excel("output/checking/999_diferences.xlsx") %>% select(-!!sym(directory_dictionary$enum_colname))
+source('src/sections/section_5_finish_999_checks.R')
+```
+
+Time for logic checks
+```{r Section L - Your logic checks go here}
+cleaning.log.checks.direct <- tibble()
+```
+
+Outlier checks will require you to set some parameters prior to running the algorithm. Check the documentation on `detect.outliers` to find more details.
+```{r Section 6 - Check for outliers}
+# specify the number of standard deviations you want to use
+n.sd <- 3
+
+# specify methods for  detecting outliers
+method <- "o1"
+
+# ignore 0 values or not
+ignore_0 <- T
+
+# specify as many loops as you need 
+# specify columns for check or leave them empty
+cols.integer_raw.main <- c()
+cols.integer_raw.loop1 <- c()
+cols.integer_raw.loop2 <- c()
+cols.integer_raw.loop3 <- c()
+
+source('src/sections/section_6_detect_and_visualise_outliers.R')
+
+
+```
+
+Edit the file
+Manually check outliers and set the value of the `checked` column.
+If the entry within the `cleaning.log.outliers` works for you, set the `checked` column value to `value checked`, if you want to change the old value to the new one, specify it within the `new.value` column and set the `checked` column value to `value corrected`.
+
+Save your changes in the same file or create a new file in output/checking/responses/ and change the path in the `cleaning.log.outliers` below
+
+```{r}
+cleaning.log.outliers_full <- read.xlsx(paste0("output/checking/outliers/outlier_analysis_", n.sd, "sd.xlsx"),
+                                   sheet = 1)
+
+cleaning.log.outliers <- cleaning.log.outliers_full %>% filter(checked%==%'value corrected')
+
+source('src/sections/section_6_finish_outlier_check.R')
+
+cleaning.log <- bind_rows(cleaning.log,cleaning.log.outliers_full)
+
+```
+
+You're done with cleaning (yay). Now you have to drop the unnecessary data and fill in the template for HQ valiadation.
+
+```{r Section 7 - Finalize the cleaning log}
+
+# finalize cleaning log:
+cleaning.log <- cleaning.log %>% distinct() %>%
+  filter(old.value %not=na% new.value) %>% left_join(raw.main %>% select(uuid, any_of(directory_dictionary$enum_colname)))
+
+if (length(list.files(make.filename.xlsx("output/cleaning_log", "cleaning_log", no_date = T))) > 0) {
+  cleaning.log.previous <- read_xlsx(make.filename.xlsx("output/cleaning_log", "cleaning_log"))
+  cleaning.log.whole <- rbind(cleaning.log.previous, cleaning.log)
+} else {
+  cleaning.log.whole <- cleaning.log
+}
+# Output Cleaning Log
+write.xlsx(cleaning.log.whole, make.filename.xlsx("output/cleaning_log", "cleaning_log", no_date = T), overwrite = T)
+
+```
+
+
+```{r Section 7 Remove PII columns}
+# specify the PII columns to remove
+pii.to.remove_main <- c(
+  "deviceid",
+  "staff_other",
+  "audit",
+  "audit_URL",
+  "username")
+
+# remove PII from raw.
+raw.main  <- raw.main %>% select(-any_of(pii.to.remove_main))
+kobo.raw.main  <- kobo.raw.main %>% select(-any_of(pii.to.remove_main))
+
+if(length(ls)>1){
+  ls_loops <- ls[2:length(ls)]
+}else{ls_loops <- c()}
+
+# remove empty columns from loops
+if(length(ls_loops)>0){
+  for(loop in ls_loops){
+    txt <- paste0("empty_cols <- apply(",loop,",2,function(x){all(is.na(x))}) %>% 
+    data.frame() %>% 
+    rownames_to_column(var='name') %>% 
+    rename('test'=2) %>% 
+    filter(test==TRUE) %>% pull(name)")
+    
+    eval(parse(txt))
+    
+    cols.to.remove <- c(
+      "deviceid",
+      "staff_other",
+      "audit",
+      "audit_URL",
+      "username",empty_cols)
+    
+    txt <- paste0(loop,"  <- ",loop," %>% select(-any_of(cols.to.remove))")
+    
+    eval(parse(txt))
+
+  }
+}
+
+```
+
+
+```{r Section 7 - Save the raw dataset with no PII}
+# create the data list that will be written into the excel 
+if(length(ls)>1){
+txt <- paste0(
+  'datasheets <-list("main" =kobo.raw.main,',
+  paste0('"',ls_loops,'" = ',sheet_names, collapse = ','),')'
+)
+}else{
+  txt <- 'datasheets <-list("main" =kobo.raw.main)'
+}
+eval(parse(text= txt))
+
+write.xlsx(datasheets, make.filename.xlsx("output/data_log", "full_data"), overwrite = T,
+           zoom = 90, firstRow = T)
+```
+
+```{r Section 7 - Save the clean dataset with no PII}
+# clean data (pii removed)
+
+if(length(ls)>1){
+txt <- paste0(
+  'datasheets_anon <-list("main" =raw.main,',
+  paste0('"',ls_loops,'" = ',sheet_names_new, collapse = ','),')'
+)}else{
+  txt <- 'datasheets_anon <-list("main" =raw.main)'
+}
+eval(parse(text= txt))
+
+write.xlsx(datasheets_anon, make.filename.xlsx("output/final", "final_anonymized_data"), overwrite = T,
+           zoom = 90, firstRow = T)
+```
+
+```{r Section 7 - Run the enumerator performance script and zip the files into one archive}
+source("src/Cleaning_logbook.R")
+source("package4validation.R")
+```
+
+You are done. Congratulations :)
